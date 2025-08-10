@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Multi-Device Location Tracker with Alerts</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+    <style>
+        #map { height: 500px; width: 100%; }
+        #controls { 
+            margin: 10px; 
+            display: flex; 
+            flex-direction: row; 
+            align-items: flex-start; 
+        }
+        #deviceList {
+            width: 200px;
+            max-height: 150px;
+            overflow-y: auto;
+            margin-right: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 5px;
+        }
+        .device-item {
+            display: flex;
+            align-items: center;
+            padding: 5px 0;
+        }
+        .device-item input[type="checkbox"] {
+            margin-right: 10px;
+            accent-color: blue;
+        }
+        .device-item label {
+            font-size: 14px;
+        }
+        #statusContainer {
+            flex-grow: 1;
+        }
+        .device-status {
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 15px;
+            background-color: #f9f9f9;
+        }
+        .device-title {
+            font-weight: bold;
+            font-size: 16px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+        .analysis-box {
+            background-color: #f0f0f0;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+            padding: 8px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+        }
+        .status-circle {
+            width: 15px;
+            height: 15px;
+            background-color: blue;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        .speed-circle {
+            width: 15px;
+            height: 15px;
+            background-color: blue;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        .alert-text {
+            display: inline-block;
+            font-weight: bold;
+            vertical-align: middle;
+        }
+        #buttonContainer {
+            margin-left: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        #buttonContainer button {
+            margin-bottom: 10px;
+            padding: 5px 10px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        #startBtn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        #stopBtn {
+            background-color: #f44336;
+            color: white;
+        }
+        #startBtn:disabled, #stopBtn:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <div id="deviceList">
+            <!-- دستگاه‌ها اینجا به‌صورت داینامیک با چک‌باکس پر می‌شن -->
+        </div>
+        <div id="statusContainer"></div>
+        <div id="buttonContainer">
+            <button id="startBtn">Start</button>
+            <button id="stopBtn" disabled>Stop</button>
+        </div>
+    </div>
+    <div id="map"></div>
+
+    <script defer>
+        const map = L.map('map').setView([35.697249, 51.389164], 16);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+        const markers = {};
+        const polylines = {};
+        let recordedPoints = {};
+        let recording = false;
+        let userInteracted = false;
+        let polygon = null;
+        const drawnItems = new L.FeatureGroup();
+        let selectedDevices = [];
+
+        const drawControl = new L.Control.Draw({
+            draw: {
+                polygon: true,
+                polyline: false,
+                rectangle: false,
+                circle: false,
+                marker: false,
+                circlemarker: false
+            },
+            edit: {
+                featureGroup: drawnItems
+            }
+        });
+        map.addControl(drawControl);
+        map.addLayer(drawnItems);
+
+        map.on('draw:created', function (e) {
+            if (polygon) {
+                drawnItems.removeLayer(polygon);
+            }
+            polygon = e.layer;
+            drawnItems.addLayer(polygon);
+        });
+
+        map.on('draw:deleted', function (e) {
+            if (drawnItems.getLayers().length === 0) {
+                polygon = null;
+                updateStatusDisplays();
+            } else {
+                polygon = drawnItems.getLayers()[0];
+            }
+        });
+
+        map.on('zoomstart mousedown', () => {
+            userInteracted = true;
+        });
+
+        function pointInPolygon(point, polygonCoords) {
+            const x = point[0];
+            const y = point[1];
+            let inside = false;
+            for (let i = 0, j = polygonCoords.length - 1; i < polygonCoords.length; j = i++) {
+                const xi = polygonCoords[i][0];
+                const yi = polygonCoords[i][1];
+                const xj = polygonCoords[j][0];
+                const yj = polygonCoords[j][1];
+                const intersect = ((yi > y) !== (yj > y)) &&
+                    (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        }
+
+        function updateDeviceList(devices) {
+            const deviceList = document.getElementById('deviceList');
+            const uniqueDevices = new Map();
+            devices.forEach(device => {
+                if (!uniqueDevices.has(device.android_id)) {
+                    uniqueDevices.set(device.android_id, true);
+
+                    let deviceItem = deviceList.querySelector(`#device-${device.android_id}`);
+                    if (!deviceItem) {
+                        deviceItem = document.createElement('div');
+                        deviceItem.className = 'device-item';
+                        deviceItem.id = `device-${device.android_id}`;
+
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.value = device.android_id;
+                        checkbox.id = `checkbox-${device.android_id}`;
+
+                        const label = document.createElement('label');
+                        label.htmlFor = `checkbox-${device.android_id}`;
+                        label.textContent = `${device.device_model} (${device.android_id})`;
+
+                        deviceItem.appendChild(checkbox);
+                        deviceItem.appendChild(label);
+                        deviceList.appendChild(deviceItem);
+
+                        checkbox.addEventListener('change', function () {
+                            selectedDevices = Array.from(document.querySelectorAll('#deviceList input[type="checkbox"]:checked'))
+                                .map(input => input.value);
+                            updateMap();
+                            updateStatusDisplays();
+                        });
+                    }
+
+                    const checkbox = deviceItem.querySelector(`#checkbox-${device.android_id}`);
+                    checkbox.checked = selectedDevices.includes(device.android_id);
+                }
+            });
+
+            const existingItems = deviceList.querySelectorAll('.device-item');
+            existingItems.forEach(item => {
+                const android_id = item.id.replace('device-', '');
+                if (!devices.some(device => device.android_id === android_id)) {
+                    item.remove();
+                }
+            });
+        }
+
+        function createStatusDisplay(device) {
+            const android_id = device.android_id;
+            const statusContainer = document.getElementById('statusContainer');
+            let statusDiv = document.querySelector(`#status-${android_id}`);
+            if (!statusDiv) {
+                statusDiv = document.createElement('div');
+                statusDiv.id = `status-${android_id}`;
+                statusDiv.className = 'device-status';
+
+                const deviceTitle = document.createElement('div');
+                deviceTitle.className = 'device-title';
+                deviceTitle.textContent = `${device.device_model} (${device.android_id})`;
+                statusDiv.appendChild(deviceTitle);
+
+                const polygonBox = document.createElement('div');
+                polygonBox.className = 'analysis-box';
+                const polygonCircle = document.createElement('span');
+                polygonCircle.className = 'status-circle';
+                polygonCircle.id = `polygonCircle-${android_id}`;
+                const polygonText = document.createElement('span');
+                polygonText.className = 'alert-text';
+                polygonText.id = `polygonText-${android_id}`;
+                polygonText.textContent = 'Please draw a polygon';
+                polygonBox.appendChild(polygonCircle);
+                polygonBox.appendChild(polygonText);
+
+                const speedBox = document.createElement('div');
+                speedBox.className = 'analysis-box';
+                const speedCircle = document.createElement('span');
+                speedCircle.className = 'speed-circle';
+                speedCircle.id = `speedCircle-${android_id}`;
+                const speedText = document.createElement('span');
+                speedText.className = 'alert-text';
+                speedText.id = `speedText-${android_id}`;
+                speedText.textContent = 'Speed is normal';
+                speedBox.appendChild(speedCircle);
+                speedBox.appendChild(speedText);
+
+                statusDiv.appendChild(polygonBox);
+                statusDiv.appendChild(speedBox);
+                statusContainer.appendChild(statusDiv);
+            }
+            return {
+                polygonCircle: document.getElementById(`polygonCircle-${android_id}`),
+                polygonText: document.getElementById(`polygonText-${android_id}`),
+                speedCircle: document.getElementById(`speedCircle-${android_id}`),
+                speedText: document.getElementById(`speedText-${android_id}`)
+            };
+        }
+
+        function updateStatusDisplays() {
+            fetch('/api/receive_location/', { cache: 'no-store' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success' && data.devices) {
+                        selectedDevices.forEach(android_id => {
+                            const device = data.devices.find(d => d.android_id === android_id);
+                            if (device) {
+                                const { polygonCircle, polygonText, speedCircle, speedText } = createStatusDisplay(device);
+                                if (polygon) {
+                                    const polygonCoords = polygon.getLatLngs()[0].map(latLng => [latLng.lat, latLng.lng]);
+                                    const userPoint = [device.latitude, device.longitude];
+                                    const isInsidePolygon = pointInPolygon(userPoint, polygonCoords);
+                                    if (isInsidePolygon) {
+                                        polygonCircle.style.backgroundColor = 'blue';
+                                        polygonText.textContent = 'Inside polygon';
+                                    } else {
+                                        polygonCircle.style.backgroundColor = 'red';
+                                        polygonText.textContent = 'Outside polygon';
+                                    }
+                                } else {
+                                    polygonCircle.style.backgroundColor = 'blue';
+                                    polygonText.textContent = 'Please draw a polygon';
+                                }
+
+                                const speedThreshold = 2;
+                                const isOverThreshold = device.speed > speedThreshold;
+                                if (isOverThreshold) {
+                                    speedCircle.style.backgroundColor = 'red';
+                                    speedText.textContent = 'Speed exceeds 2 m/s!';
+                                    speedText.style.color = 'red';
+                                } else {
+                                    speedCircle.style.backgroundColor = 'blue';
+                                    speedText.textContent = 'Speed is normal';
+                                    speedText.style.color = 'black';
+                                }
+                            }
+                        });
+                    }
+
+                    const statusContainer = document.getElementById('statusContainer');
+                    const allStatusDivs = statusContainer.querySelectorAll('[id^="status-"]');
+                    allStatusDivs.forEach(div => {
+                        const android_id = div.id.replace('status-', '');
+                        if (!selectedDevices.includes(android_id)) {
+                            div.remove();
+                        }
+                    });
+                });
+        }
+
+        function updateMap() {
+            fetch('/api/receive_location/', { cache: 'no-store' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success' && data.devices) {
+                        data.devices.forEach(device => {
+                            const { android_id, latitude, longitude, speed, battery_level, device_model } = device;
+                            const popupContent = `Android ID: ${android_id}<br>Model: ${device_model || 'Unknown'}<br>Latitude: ${latitude}<br>Longitude: ${longitude}<br>Speed: ${speed} m/s<br>Battery: ${battery_level * 100}%<br>Timestamp: ${device.timestamp}`;
+
+                            if (!markers[android_id]) {
+                                markers[android_id] = L.marker([latitude, longitude])
+                                    .bindPopup(popupContent);
+                            } else {
+                                markers[android_id].setLatLng([latitude, longitude]);
+                                markers[android_id].setPopupContent(popupContent);
+                            }
+
+                            if (selectedDevices.includes(android_id)) {
+                                if (!map.hasLayer(markers[android_id])) {
+                                    markers[android_id].addTo(map);
+                                }
+                            } else {
+                                if (map.hasLayer(markers[android_id])) {
+                                    map.removeLayer(markers[android_id]);
+                                }
+                            }
+
+                            if (recording && recordedPoints[android_id]) {
+                                if (polylines[android_id]) {
+                                    map.removeLayer(polylines[android_id]);
+                                }
+                                if (selectedDevices.includes(android_id)) {
+                                    polylines[android_id] = L.polyline(recordedPoints[android_id], { color: 'blue' }).addTo(map);
+                                }
+                            }
+                        });
+                    }
+                });
+        }
+
+        function fetchData() {
+            fetch('/api/receive_location/', { cache: 'no-store' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success' && data.devices) {
+                        // فقط دستگاه‌های فعلی رو توی لیست و نقشه به‌روزرسانی کن
+                        updateDeviceList(data.devices);
+                        updateMap();
+
+                        data.devices.forEach(device => {
+                            const { android_id, latitude, longitude, speed, battery_level, device_model } = device;
+                            const popupContent = `Android ID: ${android_id}<br>Model: ${device_model || 'Unknown'}<br>Latitude: ${latitude}<br>Longitude: ${longitude}<br>Speed: ${speed} m/s<br>Battery: ${battery_level * 100}%<br>Timestamp: ${device.timestamp}`;
+
+                            if (!markers[android_id]) {
+                                markers[android_id] = L.marker([latitude, longitude])
+                                    .bindPopup(popupContent);
+                            } else {
+                                markers[android_id].setLatLng([latitude, longitude]);
+                                markers[android_id].setPopupContent(popupContent);
+                            }
+
+                            if (selectedDevices.includes(android_id)) {
+                                if (!map.hasLayer(markers[android_id])) {
+                                    markers[android_id].addTo(map);
+                                }
+                            } else {
+                                if (map.hasLayer(markers[android_id])) {
+                                    map.removeLayer(markers[android_id]);
+                                }
+                            }
+
+                            if (recording) {
+                                if (!recordedPoints[android_id]) {
+                                    recordedPoints[android_id] = [];
+                                }
+                                recordedPoints[android_id].push([latitude, longitude]);
+                                if (polylines[android_id]) {
+                                    map.removeLayer(polylines[android_id]);
+                                }
+                                if (selectedDevices.includes(android_id)) {
+                                    polylines[android_id] = L.polyline(recordedPoints[android_id], { color: 'blue' }).addTo(map);
+                                }
+                            }
+                        });
+
+                        if (!userInteracted) {
+                            if (data.devices.length > 0) {
+                                const latestDevice = data.devices[0];
+                                map.setView([latestDevice.latitude, latestDevice.longitude], 16);
+                            }
+                        }
+                        updateStatusDisplays();
+                    }
+                })
+                .catch(error => console.error('Error fetching data:', error.message));
+        }
+        setInterval(fetchData, 1000);
+
+        document.getElementById('startBtn').addEventListener('click', () => {
+            fetch('/start_recording/', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Start response:', data);
+                    if (data.status === 'started') {
+                        recording = true;
+                        recordedPoints = {};
+                        Object.keys(polylines).forEach(android_id => {
+                            if (polylines[android_id]) {
+                                map.removeLayer(polylines[android_id]);
+                            }
+                        });
+                        document.getElementById('startBtn').disabled = true;
+                        document.getElementById('stopBtn').disabled = false;
+                    }
+                })
+                .catch(error => console.error('Start error:', error.message));
+        });
+
+        document.getElementById('stopBtn').addEventListener('click', () => {
+            fetch('/stop_recording/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ selected_devices: selectedDevices })
+            })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Stop response:', data);
+                    if (data.files) {
+                        alert(`Shapefiles saved: ${data.files.join(', ')}`);
+                    } else {
+                        alert(data.message || 'Recording stopped.');
+                    }
+                    document.getElementById('startBtn').disabled = false;
+                    document.getElementById('stopBtn').disabled = true;
+                })
+                .catch(error => console.error('Stop error:', error.message));
+            recording = false;
+        });
+    </script>
+</body>
+</html>
